@@ -4,6 +4,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 import requests
+import time
+import random
 
 st.set_page_config(page_title="AlphaQuant Elite Terminal", layout="wide", initial_sidebar_state="expanded")
 
@@ -12,12 +14,6 @@ st.markdown("""
     .stApp { background-color: #0a0e1a; }
     .main .block-container { padding: 1.5rem 2rem; }
     [data-testid="stSidebar"] { background-color: #0d1117; border-right: 1px solid #1f2937; }
-    .metric-card {
-        background: linear-gradient(135deg, #0d1117 0%, #161b27 100%);
-        border: 1px solid #1f2937;
-        border-radius: 12px;
-        padding: 1rem 1.2rem;
-    }
     h1, h2, h3 { color: #e2e8f0 !important; }
     .stMetric label { color: #94a3b8 !important; font-size: 0.75rem !important; text-transform: uppercase; letter-spacing: 0.05em; }
     .stMetric [data-testid="stMetricValue"] { color: #f1f5f9 !important; font-size: 1.4rem !important; font-weight: 600; }
@@ -36,6 +32,42 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ── ROBUST FETCH WITH RETRY ────────────────────────────────────────────────────
+def fetch_stock_data(ticker, retries=4):
+    user_agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+    ]
+    for attempt in range(retries):
+        try:
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': random.choice(user_agents),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+            })
+            stock = yf.Ticker(ticker, session=session)
+            df = stock.history(period="1y")
+            if not df.empty:
+                info = {}
+                try:
+                    info = stock.info
+                except Exception:
+                    pass
+                return stock, df, info
+            if attempt < retries - 1:
+                time.sleep(2 + attempt * 2)
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(2 + attempt * 2)
+            else:
+                raise e
+    return None, pd.DataFrame(), {}
+
 # ── HEADER ─────────────────────────────────────────────────────────────────────
 col_logo, col_title = st.columns([1, 11])
 with col_logo:
@@ -48,18 +80,19 @@ st.markdown("---")
 
 # ── SIDEBAR SEARCH ─────────────────────────────────────────────────────────────
 st.sidebar.markdown("## 🎛️ Market Search")
-st.sidebar.markdown("Search any company worldwide")
 user_search_query = st.sidebar.text_input("Company name or ticker:", value="Reliance", placeholder="e.g. Apple, RELIANCE, Tesla")
 
 selected_ticker, display_name = None, ""
 
 if user_search_query.strip():
     try:
+        ua = random.choice([
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        ])
         search_url = f"https://query2.finance.yahoo.com/v1/finance/search?q={user_search_query}&quotesCount=8&newsCount=0"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(search_url, headers=headers, timeout=5).json()
+        response = requests.get(search_url, headers={'User-Agent': ua}, timeout=8).json()
         search_results = response.get('quotes', [])
-
         if search_results:
             options_dict = {}
             for item in search_results:
@@ -72,9 +105,8 @@ if user_search_query.strip():
             if dropdown_selection:
                 selected_ticker, display_name = options_dict[dropdown_selection]
         else:
-            st.sidebar.warning("No results found. Try a different term.")
+            st.sidebar.warning("No results found.")
     except Exception:
-        st.sidebar.error("Search offline. Using manual entry.")
         selected_ticker = user_search_query.strip().upper()
         display_name = selected_ticker
 
@@ -96,15 +128,21 @@ for name, ticker in popular.items():
 
 # ── MAIN DATA ──────────────────────────────────────────────────────────────────
 if selected_ticker:
+    progress_bar = st.progress(0, text="🔍 Connecting to market data...")
     try:
-        with st.spinner(f"Loading data for {selected_ticker}..."):
-            stock = yf.Ticker(selected_ticker)
-            df = stock.history(period="1y")
-            info = stock.info
+        progress_bar.progress(20, text="📡 Fetching price history...")
+        stock, df, info = fetch_stock_data(selected_ticker)
+        progress_bar.progress(70, text="📊 Building charts...")
 
-        if df.empty:
-            st.error(f"❌ No data found for '{selected_ticker}'. Try a different ticker.")
+        if df is None or df.empty:
+            progress_bar.empty()
+            st.error(f"❌ Could not load data for '{selected_ticker}' after multiple attempts. Yahoo Finance may be temporarily blocking requests. Please wait 1–2 minutes and try again.")
+            st.info("💡 **Tip:** Try searching by exact ticker symbol (e.g. RELIANCE.NS, AAPL, TCS.NS)")
             st.stop()
+
+        progress_bar.progress(100, text="✅ Data loaded!")
+        time.sleep(0.3)
+        progress_bar.empty()
 
         cs = "₹" if (".NS" in selected_ticker or ".BO" in selected_ticker) else "$"
         company_name = info.get('longName', display_name)
@@ -117,7 +155,6 @@ if selected_ticker:
         pct_change = (price_change / prev_close) * 100 if prev_close else 0
         change_emoji = "📈" if price_change >= 0 else "📉"
 
-        # ── COMPANY HEADER ────────────────────────────────────────────────────
         h1, h2 = st.columns([8, 2])
         with h1:
             st.markdown(f"<h2 style='margin-bottom:2px'>{change_emoji} {company_name}</h2>", unsafe_allow_html=True)
@@ -132,7 +169,6 @@ if selected_ticker:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # ── KPI CARDS ─────────────────────────────────────────────────────────
         c1, c2, c3, c4, c5 = st.columns(5)
         with c1:
             st.metric("Live Price", f"{cs}{current_price:,.2f}", f"{price_change:+,.2f} ({pct_change:+.2f}%)")
@@ -153,7 +189,6 @@ if selected_ticker:
 
         st.markdown("---")
 
-        # ── CHART ─────────────────────────────────────────────────────────────
         tab1, tab2, tab3 = st.tabs(["📊 Candlestick Chart", "📉 Price & Volume", "🔥 Returns Heatmap"])
 
         with tab1:
@@ -185,21 +220,17 @@ if selected_ticker:
 
         with tab3:
             df['Month'] = df.index.strftime('%b %Y')
-            df['DayOfWeek'] = df.index.day_name()
             df['DailyReturn'] = df['Close'].pct_change() * 100
             monthly = df.groupby('Month')['DailyReturn'].mean().reset_index()
             monthly.columns = ['Month', 'Avg Daily Return (%)']
             fig3 = px.bar(monthly, x='Month', y='Avg Daily Return (%)',
-                color='Avg Daily Return (%)', color_continuous_scale=['#f87171','#1f2937','#34d399'],
-                title="Monthly Average Daily Return")
+                color='Avg Daily Return (%)', color_continuous_scale=['#f87171','#1f2937','#34d399'])
             fig3.update_layout(template="plotly_dark", paper_bgcolor='#0d1117', plot_bgcolor='#0d1117',
-                height=380, margin=dict(l=10, r=10, t=40, b=10),
+                height=380, margin=dict(l=10, r=10, t=20, b=10),
                 xaxis=dict(gridcolor='#1f2937', tickangle=-45), yaxis=dict(gridcolor='#1f2937'))
             st.plotly_chart(fig3, use_container_width=True)
 
         st.markdown("---")
-
-        # ── RATIOS ────────────────────────────────────────────────────────────
         st.subheader("📈 Financial Ratios Matrix")
 
         def fmt(val, pct=False, mult=False):
@@ -237,8 +268,6 @@ if selected_ticker:
             }))
 
         st.markdown("---")
-
-        # ── BUSINESS OVERVIEW ─────────────────────────────────────────────────
         with st.expander("🏢 Business Overview & Company Profile"):
             bio_col, stat_col = st.columns([3, 1])
             with bio_col:
@@ -248,10 +277,12 @@ if selected_ticker:
                 st.write(f"👥 Employees: {info.get('fullTimeEmployees', 'N/A'):,}" if info.get('fullTimeEmployees') else "👥 Employees: N/A")
                 st.write(f"🌍 Country: {info.get('country', 'N/A')}")
                 st.write(f"🌐 Website: [{info.get('website', 'N/A')}]({info.get('website', '#')})")
-                st.write(f"📅 Fiscal Year End: {info.get('fiscalYearEnd', 'N/A')}")
 
         st.markdown("---")
-        st.caption("⚠️ AlphaQuant is for informational purposes only. Not financial advice. Data via Yahoo Finance.")
+        st.caption("⚠️ For informational purposes only. Not financial advice. Data via Yahoo Finance.")
 
     except Exception as e:
-        st.error(f"Error loading data: {e}")
+        progress_bar.empty()
+        st.error(f"⚠️ Failed to load data: {e}")
+        st.info("Yahoo Finance is rate-limiting requests. Please wait 1–2 minutes and refresh the page.")
+        
